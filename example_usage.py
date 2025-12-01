@@ -4,12 +4,43 @@ Demonstrates key features and typical workflows
 """
 
 from concierge_agent import (
-    create_concierge_agent,
+    route_request, 
     ConciergeSession,
     save_plan_to_file
 )
 import os
+from google.genai import types  
 
+
+def extract_text_from_response(response: types.GenerateContentResponse) -> str:
+    """Helper to safely extract text from the response object."""
+    return response.text if hasattr(response, 'text') and response.text else str(response)
+
+def run_demo(session: ConciergeSession, request: str):
+    """
+    Standardized function to run a request through the new router logic.
+    """
+    # 1. Get context from the session
+    context = session.get_context()
+    
+    # 2. Call the new routing function
+    response = route_request(
+        user_prompt=request,
+        context=context
+    )
+    
+    # 3. Process response
+    response_text = extract_text_from_response(response)
+    print(response_text)
+    
+    # 4. Save the interaction
+    session.add_interaction(request, response_text)
+    return response_text
+
+
+# ============================================================================
+# DEMO FUNCTIONS (Updated to use run_demo helper)
+# ============================================================================
 
 def demo_meal_planning():
     """
@@ -19,7 +50,6 @@ def demo_meal_planning():
     print("DEMO 1: Meal Planning")
     print("="*60)
     
-    concierge = create_concierge_agent()
     session = ConciergeSession(user_id="demo_meal_user")
     
     # Example request
@@ -36,14 +66,11 @@ def demo_meal_planning():
     print("\nProcessing...\n")
     
     try:
-        response = concierge.generate_content(request)
-        print(response.text)
-        
-        # Save the interaction
-        session.add_interaction(request, response.text)
+        response_text = run_demo(session, request)
         
         # Save the meal plan to file
-        save_plan_to_file("meal_plan_week1.md", response.text)
+        # Note: The model might call save_plan_to_file itself, but this is a fail-safe
+        save_plan_to_file("meal_plan_week1.md", response_text)
         print("\n✓ Meal plan saved to output/meal_plan_week1.md")
         
     except Exception as e:
@@ -58,11 +85,11 @@ def demo_shopping_list():
     print("DEMO 2: Shopping List Generation")
     print("="*60)
     
-    concierge = create_concierge_agent()
     session = ConciergeSession(user_id="demo_shopping_user")
     
+    # This request assumes a prior meal plan was generated (or relies on the model's ability to mock one)
     request = """
-    Based on my meal plan (vegetarian, Italian/Indian/Mexican mix),
+    Based on a simple vegetarian meal plan (Italian/Indian/Mexican mix for 4 days),
     create a detailed shopping list organized by store section.
     Include:
     - Quantities for each item
@@ -77,11 +104,9 @@ def demo_shopping_list():
     print("\nProcessing...\n")
     
     try:
-        response = concierge.generate_content(request)
-        print(response.text)
+        response_text = run_demo(session, request)
         
-        session.add_interaction(request, response.text)
-        save_plan_to_file("shopping_list.md", response.text)
+        save_plan_to_file("shopping_list.md", response_text)
         print("\n✓ Shopping list saved to output/shopping_list.md")
         
     except Exception as e:
@@ -96,7 +121,6 @@ def demo_travel_planning():
     print("DEMO 3: Travel Planning")
     print("="*60)
     
-    concierge = create_concierge_agent()
     session = ConciergeSession(user_id="demo_travel_user")
     
     request = """
@@ -107,24 +131,16 @@ def demo_travel_planning():
     - Budget: $200/day
     - Wants a relaxed pace
     
-    Suggest the best destination and create a complete itinerary with:
-    - Day-by-day schedule
-    - Hotel recommendations
-    - Restaurant suggestions
-    - Activity details and timing
-    - Budget breakdown
-    - Local tips
+    Suggest the best destination and create a complete itinerary.
     """
     
     print(f"\nRequest: {request}")
     print("\nProcessing...\n")
     
     try:
-        response = concierge.generate_content(request)
-        print(response.text)
+        response_text = run_demo(session, request)
         
-        session.add_interaction(request, response.text)
-        save_plan_to_file("travel_itinerary_kyoto.md", response.text)
+        save_plan_to_file("travel_itinerary_kyoto.md", response_text)
         print("\n✓ Travel itinerary saved to output/travel_itinerary_kyoto.md")
         
     except Exception as e:
@@ -139,34 +155,28 @@ def demo_context_memory():
     print("DEMO 4: Context Memory")
     print("="*60)
     
-    concierge = create_concierge_agent()
     session = ConciergeSession(user_id="demo_memory_user")
     
-    # First interaction
-    request1 = "I'm vegetarian and allergic to nuts"
+    # First interaction - Set preference
+    request1 = "I am strictly vegetarian and allergic to nuts."
     print(f"\nInteraction 1: {request1}")
     
     try:
-        response1 = concierge.generate_content(request1)
-        print(f"Agent: {response1.text}\n")
-        session.add_interaction(request1, response1.text)
+        response1_text = run_demo(session, request1)
+        print(f"Agent: {response1_text[:80]}...\n")
         
-        # Second interaction - agent should remember preferences
-        request2 = "Create a meal plan for me"
+        # Second interaction - Request a task that needs the preference
+        request2 = "Now, please create a 3-day meal plan for me."
         print(f"Interaction 2: {request2}")
         
-        # Add context from session
-        context = session.get_context()
-        full_request = f"{context}\n\nNew request: {request2}"
-        
-        response2 = concierge.generate_content(full_request)
-        print(f"Agent: {response2.text}")
-        session.add_interaction(request2, response2.text)
+        # The run_demo helper automatically includes session context for this call
+        response2_text = run_demo(session, request2)
+        print(f"Agent: {response2_text[:300]}...")
         
         # Save session
         session_file = session.save_session()
         print(f"\n✓ Session saved to {session_file}")
-        print("Note: The agent remembered your dietary restrictions!")
+        print("Note: The agent should incorporate your dietary restrictions into the meal plan!")
         
     except Exception as e:
         print(f"Error: {e}")
@@ -175,41 +185,34 @@ def demo_context_memory():
 def demo_multi_agent_coordination():
     """
     Demonstrates multi-agent coordination for complex workflow
+    (Now implemented as a single prompt triggering multiple Tool Calls and structured output)
     """
     print("\n" + "="*60)
     print("DEMO 5: Multi-Agent Coordination")
     print("="*60)
     
-    concierge = create_concierge_agent()
     session = ConciergeSession(user_id="demo_coordination_user")
     
     request = """
     I'm hosting a dinner party this Saturday for 6 people.
-    Help me:
-    1. Plan a 3-course vegetarian menu (appetizer, main, dessert)
-    2. Create a shopping list
-    3. Suggest a wine pairing
-    4. Give me a timeline for cooking everything
+    Help me plan the whole event:
+    1. Plan a 3-course vegetarian menu (appetizer, main, dessert) using Mediterranean cuisine.
+    2. Create a comprehensive shopping list.
+    3. Suggest a wine pairing.
+    4. Give me a timeline for cooking everything.
     
-    Budget: $100 total
-    Theme: Mediterranean cuisine
-    Cooking skill: Intermediate
+    Budget: $100 total. Cooking skill: Intermediate.
     """
     
     print(f"\nRequest: {request}")
-    print("\nProcessing with multiple agents...\n")
+    print("\nProcessing (involves research and multi-step plan generation)...\n")
     
     try:
-        response = concierge.generate_content(request)
-        print(response.text)
+        response_text = run_demo(session, request)
         
-        session.add_interaction(request, response.text)
-        save_plan_to_file("dinner_party_plan.md", response.text)
+        save_plan_to_file("dinner_party_plan.md", response_text)
         print("\n✓ Dinner party plan saved to output/dinner_party_plan.md")
-        print("\nThis demo showed coordination between:")
-        print("  - Meal Planner Agent (menu creation)")
-        print("  - Shopping Agent (shopping list)")
-        print("  - Main Coordinator (timeline & wine pairing)")
+        print("\nThis demo showed the Concierge coordinating a complex task by using Tool Calling and comprehensive planning.")
         
     except Exception as e:
         print(f"Error: {e}")
@@ -228,8 +231,7 @@ def main():
     print("  3. Travel Planning")
     print("  4. Context Memory")
     print("  5. Multi-Agent Coordination")
-    print("\nNote: These demos use simulated data for tool responses.")
-    print("In production, they would use real web search and APIs.")
+    print("\nNote: These demos use the refactored Tool Calling logic (in concierge_agent.py).")
     print("="*70)
     
     # Check for API key
@@ -267,11 +269,13 @@ def main():
                 demo_func()
                 input("\nPress Enter to continue to next demo...")
         else:
-            for num, name, demo_func in demos:
+            found = False
+            for num, _, demo_func in demos:
                 if choice == num:
                     demo_func()
+                    found = True
                     break
-            else:
+            if not found:
                 print("Invalid choice. Please try again.")
 
 
