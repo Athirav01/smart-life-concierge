@@ -120,7 +120,7 @@ pip install google-genai
 
 1. **Clone the repository**
 ```bash
-git clone https://github.com/yourusername/smart-life-concierge.git
+git clone https://github.com/Athirav01/smart-life-concierge.git
 cd smart-life-concierge
 ```
 
@@ -240,6 +240,7 @@ smart-life-concierge/
 ├── requirements.txt         # Python dependencies
 ├── README.md               # This file
 ├── output/                 # Generated plans (meal plans, itineraries)
+├── images/                 #image files
 ├── sessions/               # User session data
 └── tests/                  # Unit tests (if time permits)
 ```
@@ -276,8 +277,8 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 ## 👤 Author
 
 **Your Name**
-- GitHub: [@yourusername](https://github.com/yourusername)
-- Kaggle: [Your Kaggle Profile]
+- GitHub: [@Athirav01](https://github.com/yourusername)
+- Kaggle: https://www.kaggle.com/athirav01
 
 ## 🙏 Acknowledgments
 
