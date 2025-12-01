@@ -1,29 +1,37 @@
 """
 Smart Life Concierge Agent - Main Orchestrator
 A multi-agent system for meal planning, shopping, and travel assistance.
+Refactored to use standard Google GenAI SDK (v1.52.0) with Tool Calling.
 """
 
 from google import genai
 from google.genai import types
-from google.genai.agents import Agent, LoopAgent
 import json
 import os
-from datetime import datetime, timedelta
-from typing import Dict, List, Any
+from datetime import datetime
+from typing import Dict, List, Any, Callable
 
+# Initialize the Gemini Client globally
+# The client object is required for all model interactions.
+# It uses the GOOGLE_API_KEY environment variable automatically.
+try:
+    CLIENT = genai.Client()
+except Exception as e:
+    print(f"Error initializing Gemini Client: {e}")
+    # CLIENT will be None if the key is missing or invalid.
 
 # ============================================================================
-# CUSTOM TOOLS
+# CUSTOM TOOLS (Functions for the model to call)
 # ============================================================================
 
 def save_plan_to_file(filename: str, content: str) -> str:
     """
     Saves the generated plan to a file.
-    
+
     Args:
         filename: Name of the file to save
         content: Content to write to file
-    
+
     Returns:
         Success message with file path
     """
@@ -32,22 +40,21 @@ def save_plan_to_file(filename: str, content: str) -> str:
         filepath = os.path.join("output", filename)
         with open(filepath, 'w', encoding='utf-8') as f:
             f.write(content)
-        return f"Successfully saved to {filepath}"
+        return json.dumps({"status": "Success", "message": f"Successfully saved to {filepath}"})
     except Exception as e:
-        return f"Error saving file: {str(e)}"
+        return json.dumps({"status": "Error", "message": f"Error saving file: {str(e)}"})
 
 
 def get_user_preferences(preference_type: str) -> Dict[str, Any]:
     """
     Retrieves stored user preferences from memory.
-    
+
     Args:
         preference_type: Type of preferences (dietary, travel, budget)
-    
+
     Returns:
         Dictionary of user preferences
     """
-    # In a real implementation, this would read from a database or file
     # For demo purposes, returning sample preferences
     preferences = {
         "dietary": {
@@ -75,17 +82,16 @@ def get_user_preferences(preference_type: str) -> Dict[str, Any]:
 def web_search_tool(query: str) -> str:
     """
     Simulates web search for recipes, travel info, and deals.
-    
+
     Args:
         query: Search query string
-    
+
     Returns:
         Search results as formatted string
     """
-    # In production, this would use actual web search API
     # For demo, returning structured sample data
     if "recipe" in query.lower():
-        return """
+        result = """
         Found 5 recipes:
         1. Easy Vegetarian Pasta Primavera (30 min, $12 for 4 servings)
         2. Quick Indian Dal Tadka (25 min, $8 for 4 servings)
@@ -94,7 +100,7 @@ def web_search_tool(query: str) -> str:
         5. Thai Vegetable Stir-fry (25 min, $11 for 4 servings)
         """
     elif "travel" in query.lower():
-        return """
+        result = """
         Travel recommendations:
         - Kyoto, Japan: Rich culture, temples, excellent food scene
         - Barcelona, Spain: Architecture, beaches, vibrant nightlife
@@ -102,7 +108,7 @@ def web_search_tool(query: str) -> str:
         - Edinburgh, Scotland: History, hiking, festivals
         """
     elif "grocery" in query.lower() or "price" in query.lower():
-        return """
+        result = """
         Current grocery prices:
         - Fresh vegetables: $3-5/lb
         - Pasta: $2-3/box
@@ -110,231 +116,183 @@ def web_search_tool(query: str) -> str:
         - Rice: $10-15/5lb bag
         - Spices: $3-8 each
         """
-    return f"Search results for: {query}"
+    else:
+        result = f"Search results for: {query}. (No specific data found for this query in the mock system.)"
+
+    return json.dumps({"search_query": query, "results": result})
 
 
 # ============================================================================
-# VALIDATION AGENTS
+# AGENT INSTRUCTIONS (Prompts for the specialized tasks)
 # ============================================================================
 
-class MealPlanValidator(Agent):
+# The system now delegates tasks by passing the correct instruction string (prompt)
+# to the main orchestration function.
+
+MEAL_PLANNER_INSTRUCTION = """
+You are an expert meal planner and nutritionist. Your job is to create 
+detailed weekly meal plans that:
+1. Respect all dietary restrictions and preferences (use get_user_preferences)
+2. Include variety and nutritional balance.
+3. Stay within budget constraints.
+4. Use web_search_tool to find recipe ideas and prices.
+
+Format the output as a structured weekly plan with sections for each day and meal.
+"""
+
+SHOPPING_AGENT_INSTRUCTION = """
+You are a smart shopping assistant. Based on the provided meal plan, you must create:
+1. An organized shopping list by store section (produce, dairy, pantry, etc.)
+2. Consolidated quantities for all ingredients.
+3. Price estimates (use web_search_tool for current prices).
+4. Money-saving suggestions.
+
+Format the output as a structured shopping list with categories and totals.
+"""
+
+TRAVEL_PLANNER_INSTRUCTION = """
+You are an expert travel planner specializing in personalized itineraries. 
+Create a detailed travel itinerary that:
+1. Matches the user's interests and travel style (use get_user_preferences).
+2. Stays within budget.
+3. Uses web_search_tool for research.
+4. Includes day-by-day schedules, accommodation, restaurant suggestions, and a budget breakdown.
+
+Format the output as a comprehensive travel guide.
+"""
+
+# ============================================================================
+# MAIN ORCHESTRATION LOGIC (Replaces the deprecated Agent class)
+# ============================================================================
+
+def process_agent_request(
+    prompt: str,
+    system_instruction: str,
+    tools: List[Callable]
+) -> types.GenerateContentResponse:
     """
-    Validates that a meal plan meets quality standards.
-    Checks for nutritional balance, variety, and budget compliance.
+    Sends a request to the Gemini model with a specific instruction and tools.
+    Handles the execution of function calls required by the model (Tool Calling).
+    
+    This function replaces the functionality of the deprecated LoopAgent/Agent.
     """
     
-    def __init__(self):
-        super().__init__(
-            name="meal_plan_validator",
-            model="gemini-2.0-flash-exp",
-            description="Validates meal plans for quality and completeness",
-            instruction="""
-            You are a meal plan validator. Check that the meal plan:
-            1. Contains all requested days and meals
-            2. Provides variety (no repeated meals in same week)
-            3. Includes nutritional information
-            4. Stays within budget constraints
-            5. Respects dietary restrictions
-            
-            If validation passes, escalate with EventActions(escalate=True).
-            If validation fails, do nothing (return empty result) to trigger retry.
-            """
+    # 1. First model call: Get the initial response (which may include a function call)
+    response = CLIENT.models.generate_content(
+        model='gemini-2.5-flash',
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            system_instruction=system_instruction,
+            tools=tools
         )
+    )
+
+    # 2. Check for tool calls and execute them
+    if not response.function_calls:
+        return response
+
+    # 3. Handle tool calls (max 3 iterations for robust plan generation)
+    function_calls = response.function_calls
+    call_history = [response]
     
-    def run(self, meal_plan: str) -> Dict[str, Any]:
-        """Validates meal plan structure and content"""
-        # Check for minimum required elements
-        required_elements = ["Day", "Breakfast", "Lunch", "Dinner", "Calories"]
+    for _ in range(3):
+        tool_outputs = []
+        for call in function_calls:
+            # Look up the actual Python function by name
+            tool_func = next((t for t in tools if t.__name__ == call.name), None)
+
+            if tool_func:
+                print(f"    ➡️ Calling Tool: {call.name}({dict(call.args)})")
+                try:
+                    # Execute the tool and get the result
+                    result = tool_func(**dict(call.args))
+                    
+                    tool_outputs.append(types.Part.from_function_response(
+                        name=call.name, 
+                        response={"result": result}
+                    ))
+                except Exception as e:
+                    tool_outputs.append(types.Part.from_function_response(
+                        name=call.name, 
+                        response={"error": str(e)}
+                    ))
+            else:
+                print(f"    ⚠️ Tool not found: {call.name}")
         
-        if all(elem in meal_plan for elem in required_elements):
-            return {"valid": True, "escalate": True}
-        return {}
-
-
-class ShoppingListValidator(Agent):
-    """
-    Validates that shopping lists are complete and organized.
-    """
-    
-    def __init__(self):
-        super().__init__(
-            name="shopping_list_validator",
-            model="gemini-2.0-flash-exp",
-            description="Validates shopping lists for completeness",
-            instruction="""
-            You are a shopping list validator. Check that the list:
-            1. Is organized by category (produce, pantry, etc.)
-            2. Includes quantities for each item
-            3. Has estimated prices
-            4. Totals within budget
-            
-            If validation passes, escalate with EventActions(escalate=True).
-            If validation fails, return empty result to trigger retry.
-            """
+        # Add tool call and output to the history
+        call_history.extend(tool_outputs)
+        
+        # 4. Second model call (and subsequent retries): Send tool outputs back to the model
+        response = CLIENT.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=call_history,
+            config=types.GenerateContentConfig(
+                system_instruction=system_instruction,
+                tools=tools
+            )
         )
+        call_history.append(response)
+        
+        # If the model gives a final text response, we are done
+        if response.text:
+            return response
+        
+        # If the model requests another function call, loop again
+        function_calls = response.function_calls
+        if not function_calls:
+            break
+
+    # Return the last response, even if it's incomplete after max iterations
+    return response
 
 
 # ============================================================================
-# SPECIALIZED SUB-AGENTS
+# CONCIERGE ORCHESTRATOR (Routes the request)
 # ============================================================================
 
-def create_meal_planner_agent() -> LoopAgent:
+def route_request(user_prompt: str, context: str) -> types.GenerateContentResponse:
     """
-    Creates the meal planning agent with retry logic.
-    This agent generates weekly meal plans based on preferences.
-    """
-    meal_planner = Agent(
-        name="meal_planner",
-        model="gemini-2.0-flash-exp",
-        description="Expert nutritionist and meal planning specialist",
-        instruction="""
-        You are an expert meal planner and nutritionist. Your job is to create 
-        detailed weekly meal plans that:
-        
-        1. Respect all dietary restrictions and preferences
-        2. Provide nutritional balance (protein, carbs, fats, vitamins)
-        3. Include variety across the week (no repetitive meals)
-        4. Stay within budget constraints
-        5. Include prep time and difficulty level
-        6. Suggest make-ahead options for busy days
-        
-        For each meal, provide:
-        - Meal name
-        - Ingredients list with quantities
-        - Estimated calories and macros
-        - Preparation time
-        - Brief cooking instructions
-        
-        Format the output as a structured weekly plan with sections for each day.
-        """,
-        tools=[web_search_tool, get_user_preferences]
-    )
-    
-    # Wrap in LoopAgent for retry capability with validation
-    return LoopAgent(
-        name="robust_meal_planner",
-        agents=[meal_planner, MealPlanValidator()],
-        max_iterations=3
-    )
-
-
-def create_shopping_agent() -> Agent:
-    """
-    Creates the shopping list generator agent.
-    Converts meal plans into organized shopping lists.
-    """
-    return Agent(
-        name="shopping_agent",
-        model="gemini-2.0-flash-exp",
-        description="Smart shopping assistant that creates optimized grocery lists",
-        instruction="""
-        You are a smart shopping assistant. Based on meal plans, you create:
-        
-        1. Organized shopping lists by store section (produce, dairy, pantry, etc.)
-        2. Consolidated quantities (combine ingredients used in multiple recipes)
-        3. Price estimates for each item
-        4. Money-saving suggestions (sales, substitutions, bulk buying)
-        5. Store recommendations for best prices
-        
-        Check pantry staples and only include items likely to be needed.
-        Prioritize seasonal produce for better prices.
-        
-        Format the output as a structured shopping list with categories and totals.
-        """,
-        tools=[web_search_tool, get_user_preferences]
-    )
-
-
-def create_travel_planner_agent() -> Agent:
-    """
-    Creates the travel planning agent.
-    Researches and plans complete travel itineraries.
-    """
-    return Agent(
-        name="travel_planner",
-        model="gemini-2.0-flash-exp",
-        description="Expert travel planner specializing in personalized itineraries",
-        instruction="""
-        You are an expert travel planner. Create detailed travel itineraries that:
-        
-        1. Match the user's interests and travel style
-        2. Stay within budget constraints
-        3. Balance activities with relaxation
-        4. Include practical logistics (transportation, timing)
-        5. Recommend specific restaurants, hotels, and attractions
-        6. Provide local tips and cultural insights
-        7. Suggest day-by-day schedules with flexibility
-        
-        For each itinerary, include:
-        - Destination overview and why it's a good fit
-        - Day-by-day schedule with activities
-        - Accommodation recommendations
-        - Restaurant suggestions (breakfast, lunch, dinner)
-        - Transportation options
-        - Budget breakdown
-        - Packing suggestions
-        - Local customs and tips
-        
-        Format as a comprehensive travel guide.
-        """,
-        tools=[web_search_tool, get_user_preferences]
-    )
-
-
-# ============================================================================
-# MAIN COORDINATOR AGENT
-# ============================================================================
-
-def create_concierge_agent() -> Agent:
-    """
-    Creates the main concierge coordinator agent.
-    This is the primary interface that routes requests to specialized agents.
+    Determines the correct agent (instruction) and tools to use, 
+    then processes the request.
     """
     
-    # Initialize all sub-agents
-    meal_planner = create_meal_planner_agent()
-    shopping_agent = create_shopping_agent()
-    travel_planner = create_travel_planner_agent()
+    # Simple routing based on keywords
+    user_prompt_lower = user_prompt.lower()
     
-    # Create main coordinator
-    concierge = Agent(
-        name="smart_life_concierge",
-        model="gemini-2.0-flash-exp",
-        description="AI personal assistant for meal planning, shopping, and travel",
-        instruction="""
-        You are a Smart Life Concierge - an AI personal assistant that helps users 
-        manage their daily life through intelligent automation.
+    if "meal plan" in user_prompt_lower or "recipe" in user_prompt_lower or "dinner" in user_prompt_lower:
+        instruction = MEAL_PLANNER_INSTRUCTION
+        tools = [web_search_tool, get_user_preferences, save_plan_to_file]
+        task_name = "Meal Planning"
         
-        Your capabilities:
-        1. MEAL PLANNING: Create personalized weekly meal plans
-        2. SHOPPING: Generate smart grocery lists with budget optimization
-        3. TRAVEL: Plan complete travel itineraries with personalized recommendations
+    elif "shopping list" in user_prompt_lower or "grocery" in user_prompt_lower:
+        instruction = SHOPPING_AGENT_INSTRUCTION
+        tools = [web_search_tool, get_user_preferences, save_plan_to_file]
+        task_name = "Shopping List Generation"
         
-        Workflow:
-        1. Understand the user's request and which service they need
-        2. Delegate to the appropriate specialist agent
-        3. Review the output for quality and completeness
-        4. Present results to the user in a friendly, organized manner
-        5. Offer to save plans to files or make adjustments
+    elif "travel" in user_prompt_lower or "trip" in user_prompt_lower or "itinerary" in user_prompt_lower:
+        instruction = TRAVEL_PLANNER_INSTRUCTION
+        tools = [web_search_tool, get_user_preferences, save_plan_to_file]
+        task_name = "Travel Planning"
+
+    else:
+        # Default instruction for general inquiries
+        instruction = """
+        You are the Smart Life Concierge. Analyze the user's request. 
+        If it matches one of your core services (Meal Planning, Shopping, Travel), 
+        politely ask the user to be more specific so you can delegate the task 
+        to the appropriate specialist agent.
+        """
+        tools = [get_user_preferences]
+        task_name = "General Inquiry/Clarification"
         
-        Always:
-        - Be proactive and helpful
-        - Remember user preferences from previous interactions
-        - Provide actionable, specific recommendations
-        - Explain your reasoning when making suggestions
-        - Offer options when multiple good solutions exist
-        
-        Start each interaction by warmly greeting the user and asking how you can help.
-        """,
-        sub_agents=[meal_planner, shopping_agent, travel_planner],
-        tools=[save_plan_to_file, get_user_preferences, web_search_tool]
-    )
+    full_prompt = f"{context}\n\nCurrent request: {user_prompt}"
     
-    return concierge
+    print(f"    ⭐ Delegating to: {task_name}")
+    return process_agent_request(full_prompt, instruction, tools)
 
 
 # ============================================================================
-# SESSION AND MEMORY MANAGEMENT
+# SESSION AND MEMORY MANAGEMENT (Unchanged)
 # ============================================================================
 
 class ConciergeSession:
@@ -346,7 +304,7 @@ class ConciergeSession:
     def __init__(self, user_id: str):
         self.user_id = user_id
         self.session_history = []
-        self.preferences = {}
+        self.preferences = {} # Note: get_user_preferences is currently a mock function
         self.past_plans = []
         self.created_at = datetime.now()
         
@@ -358,19 +316,16 @@ class ConciergeSession:
             "response": response
         })
     
-    def update_preferences(self, preference_type: str, data: Dict):
-        """Updates user preferences based on feedback"""
-        self.preferences[preference_type] = data
-    
     def get_context(self) -> str:
         """Returns context from previous interactions"""
         if not self.session_history:
-            return "No previous interactions"
+            return "No previous interactions."
         
         recent = self.session_history[-3:]  # Last 3 interactions
-        context = "Recent interactions:\n"
+        context = "Recent interactions (use this for context):\n"
         for interaction in recent:
-            context += f"- {interaction['request'][:100]}...\n"
+            # Use 'request' only for context to avoid huge prompt dumps
+            context += f"- USER: {interaction['request'][:150]}...\n"
         return context
     
     def save_session(self):
@@ -399,12 +354,13 @@ class ConciergeSession:
 def main():
     """
     Main entry point for the Smart Life Concierge Agent.
-    Sets up the agent and handles user interactions.
     """
     
-    # Initialize the concierge agent
+    if CLIENT is None:
+        print("🔴 Failed to run main(): Gemini Client is not initialized. Please set GOOGLE_API_KEY.")
+        exit(1)
+
     print("Initializing Smart Life Concierge Agent...")
-    concierge = create_concierge_agent()
     
     # Create a session for the user
     session = ConciergeSession(user_id="demo_user_001")
@@ -425,8 +381,8 @@ def main():
         
         if user_input.lower() in ['exit', 'quit', 'bye']:
             print("\nThank you for using Smart Life Concierge! 👋")
-            session.save_session()
-            print(f"Session saved to: sessions/{session.user_id}_session.json")
+            session_path = session.save_session()
+            print(f"Session saved to: {session_path}")
             break
         
         if not user_input:
@@ -435,11 +391,10 @@ def main():
         try:
             # Add context from previous interactions
             context = session.get_context()
-            full_prompt = f"{context}\n\nCurrent request: {user_input}"
             
-            # Send to agent
+            # Send to the main router
             print("\n🤔 Processing your request...")
-            response = concierge.generate_content(full_prompt)
+            response = route_request(user_input, context)
             
             # Extract text from response
             response_text = response.text if hasattr(response, 'text') else str(response)
@@ -450,12 +405,12 @@ def main():
             session.add_interaction(user_input, response_text)
             
         except Exception as e:
-            print(f"\n❌ Error: {str(e)}")
-            print("Please try again with a different request.\n")
+            print(f"\n❌ A serious error occurred: {str(e)}")
+            print("Please check your API key and connection, then try again.\n")
 
 
 if __name__ == "__main__":
-    # Set up API key (user needs to provide their own)
+    # Check for API key (re-check for safety)
     if not os.getenv("GOOGLE_API_KEY"):
         print("⚠️  Please set GOOGLE_API_KEY environment variable")
         print("Example: export GOOGLE_API_KEY='your-api-key-here'")
