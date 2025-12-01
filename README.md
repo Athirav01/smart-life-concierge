@@ -28,40 +28,8 @@ Traditional apps require manual input for every task. AI agents can proactively 
 
 ### Multi-Agent System Overview
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                  Smart Life Concierge                        │
-│                 (Main Coordinator Agent)                     │
-│                                                              │
-│  • Routes requests to specialized agents                     │
-│  • Manages user sessions and memory                          │
-│  • Coordinates multi-agent workflows                         │
-│  • Provides unified interface                                │
-└─────────────────┬───────────────────────────────────────────┘
-                  │
-          ┌───────┴────────┬─────────────────┐
-          │                │                 │
-    ┌─────▼─────┐   ┌─────▼─────┐   ┌──────▼──────┐
-    │   Meal    │   │ Shopping  │   │   Travel    │
-    │  Planner  │   │   Agent   │   │   Planner   │
-    │  (Loop)   │   │           │   │             │
-    └─────┬─────┘   └─────┬─────┘   └──────┬──────┘
-          │               │                 │
-    ┌─────▼──────┐        │                 │
-    │ Validator  │        │                 │
-    │   Agent    │        │                 │
-    └────────────┘        │                 │
-                          │                 │
-         ┌────────────────┴─────────────────┴─────┐
-         │                                         │
-    ┌────▼────┐  ┌──────────┐  ┌────────────────┐ │
-    │   Web   │  │   User   │  │  File Storage  │ │
-    │ Search  │  │Preferences│  │     Tool       │ │
-    └─────────┘  └──────────┘  └────────────────┘ │
-                                                   │
-                    Shared Tools                   │
-                                                   │
-```
+![Multi-Agent System Overview](images/workflow.png)
+
 
 ### Agent Descriptions
 
